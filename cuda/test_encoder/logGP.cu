@@ -65,7 +65,8 @@ float calculate_g(cudaEvent_t start[], cudaEvent_t stop[], int num_streams, long
     float event_recorded_time = 0, total_time =0;
     for(int i=1;i<num_streams;i++)
     {
-       cudaEventElapsedTime(&event_recorded_time, stop[i], start[i-1]);
+       cudaEventElapsedTime(&event_recorded_time, start[i],stop[i-1]);
+       //printf("Event recorded time for g : %f\n",event_recorded_time);
        total_time += event_recorded_time; 
     }
     return total_time/num_streams;
@@ -203,9 +204,17 @@ int main(int argc, char *argv[])
         cudaEventRecord(stop[i],memory[i]);
     }
     CHECK(cudaThreadSynchronize());    
-    printf("G for H2D: %f",calculate_G(start,stop,num_streams,size));
+    sw.stop();
+
+    printf("H2D Time:%f\n", sw.GetTimeInSeconds());
+    for(int i=0;i<num_streams;i++)
+    {
+        cudaEventSynchronize(stop[i]);
+    }    
+    printf("G for H2D: %f\n",calculate_G(start,stop,num_streams,size));
+    printf("g for H2D: %f\n",calculate_g(start,stop,num_streams,size));
     buffer_offset_A=0;
-    
+    sw.restart();
     for(int i=0;i<num_streams;i++)
     {
         buffer_offset_A = i*sub_A;    
@@ -215,8 +224,15 @@ int main(int argc, char *argv[])
         cudaEventRecord(stop[i],memory[i]);
     }
 
-    CHECK(cudaThreadSynchronize());    
-    printf("G for D2H: %f",calculate_G(start,stop,num_streams,size));
+    CHECK(cudaThreadSynchronize());   
+    sw.stop(); 
+    printf("D2H Time:%f\n", sw.GetTimeInSeconds());
+    for(int i=0;i<num_streams;i++)
+    {
+        cudaEventSynchronize(stop[i]);
+    }    
+    printf("G for D2H: %f\n",calculate_G(start,stop,num_streams,size)); 
+    printf("g for D2H: %f\n",calculate_g(start,stop,num_streams,size));
 #endif
    
 }
