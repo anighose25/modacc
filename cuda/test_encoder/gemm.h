@@ -15,6 +15,235 @@
 
 namespace cg = cooperative_groups;
 
+#define THREADS 256
+#define TILE_DIM 32
+
+#define minus_infinity -1 * std::numeric_limits<float>::infinity()
+
+#define FINAL_MASK 0xffffffff
+
+bool useMean = true;
+
+template <typename T>
+void launch_fused_add2(T* out,
+                       const T* inp1,
+                       const T* inp2,
+                       int batch_size,
+                       int seq_length,
+                       int hidden_size,
+                       cudaStream_t& stream);
+
+template <typename T>
+void launch_fused_add4(T* out,
+                       const T* inp1,
+                       const T* inp2,
+                       const T* inp3,
+                       const T* inp4,
+                       int batch_size,
+                       int seq_length,
+                       int hidden_size,
+                       cudaStream_t& stream);
+
+template <typename T>
+void launch_fused_add3(T* out,
+                       const T* inp1,
+                       const T* inp2,
+                       const T* inp3,
+                       int batch_size,
+                       int seq_length,
+                       int hidden_size,
+                       cudaStream_t& stream);
+
+template <typename T>
+void launch_layerNorm_backward(const T* out_grad,
+                               const T* X_data,
+                               const T* vars,
+                               const T* means,
+                               const T* gamma,
+                               T* gamma_grad,
+                               T* betta_grad,
+                               T* inp_grad,
+                               int batch_size,
+                               int hidden_dim,
+                               cudaStream_t stream[2]);
+
+template <typename T>
+void launch_layerNorm_backward(const T* out_grad,
+                               const T* vals_hat,
+                               const T* vars,
+                               const T* gamma,
+                               T* gamma_grad,
+                               T* betta_grad,
+                               T* inp_grad,
+                               int batch_size,
+                               int hidden_dim,
+                               cudaStream_t stream[2],
+                               bool invertible = false,
+                               const T* betta = nullptr);
+
+inline bool UseMean()
+{
+    return useMean;
+}
+
+template <typename T>
+void launch_dropout_grad(T* vals, uint8_t* mask, int total_count, float ratio, cudaStream_t stream);
+
+template <typename T>
+void launch_dropout_grad(T* vals_out,
+                         const T* vals,
+                         uint8_t* mask,
+                         int total_count,
+                         float ratio,
+                         cudaStream_t stream);
+template <typename T>
+void Backward(int bsz, T* d_vals, cudaStream_t stream)
+{
+    launch_dropout_grad<T>(d_vals, _mask, bsz * _config.dim, _config.RATIO(), stream);
+}
+
+template <typename T>
+void Backward(int bsz, T* d_vals_out, const T* d_vals, cudaStream_t stream)
+{
+    launch_dropout_grad<T>(d_vals_out, d_vals, _mask, bsz * _config.dim, _config.RATIO(), stream);
+}
+
+bool HasDropout()
+{ 
+    return _config.RATIO() > 0.0;
+}
+
+template <typename T>
+void launch_attn_softmax_backward_v2(T* out_grad,
+                                     const T* soft_inp,
+                                     int batch_size,
+                                     int heads,
+                                     int seq_length,
+                                     cudaStream_t stream);
+
+template <typename T>
+void Backward(int bsz, T* out_grad, const T* soft_out, cudaStream_t stream)
+{
+    launch_attn_softmax_backward_v2<T>(out_grad, soft_out, bsz, config_.heads, config_.seq_length, stream);
+}
+
+template <typename T>
+void Forward(int bsz, T* out, const T* vals, cudaStream_t stream, bool bwd = false)
+{
+    launch_dropout<T>(out, vals, _mask, bsz * _config.dim, _config.dim, _config.RATIO(), stream, bwd);
+}
+
+template <typename T>
+void launch_layerNorm_backward_fused_add(const T* out_grad1,
+                                         const T* out_grad2,
+                                         const T* X_data,
+                                         const T* vars,
+                                         const T* means,
+                                         const T* gamma,
+                                         T* gamma_grad,
+                                         T* betta_grad,
+                                         T* inp_grad,
+                                         int batch_size,
+                                         int hidden_dim,
+                                         cudaStream_t stream[2]);
+template <typename T>
+void launch_layerNorm_backward_fused_add(const T* out_grad1,
+                                         const T* out_grad2,
+                                         const T* vals_hat,
+                                         const T* vars,
+                                         const T* gamma,
+                                         T* gamma_grad,
+                                         T* betta_grad,
+                                         T* inp_grad,
+                                         int batch_size,
+                                         int hidden_dim,
+                                         cudaStream_t stream[2],
+                                         bool invertible = false,
+                                         const T* betta = nullptr);
+template <typename T>
+void BackwardFusedAdd(int bsz,
+                          const T* out_grad1,
+                          const T* out_grad2,
+                          const T* gamma,
+                          T* gamma_grad,
+                          T* betta_grad,
+                          cudaStream_t stream[2],
+                          T* inp_grad_out,
+                          const T* norm_in = nullptr)
+    {
+        launch_layerNorm_backward_fused_add(out_grad1,
+                                            out_grad2,
+                                            norm_in,
+                                            vars,
+                                            means,
+                                            gamma,
+                                            gamma_grad,
+                                            betta_grad,
+                                            inp_grad_out,
+                                            bsz,
+                                            config_.hiddenDim,
+                                            stream);
+    }
+
+template <typename T>
+void BackwardFusedAdd(int bsz,
+                          const T* out_grad1,
+                          const T* out_grad2,
+                          const T* gamma,
+                          const T* betta,
+                          T* gamma_grad,
+                          T* betta_grad,
+                          cudaStream_t stream[2],
+                          T* inp_grad_out,
+                          const T* norm_out)
+    {
+        launch_layerNorm_backward_fused_add(out_grad1,
+                                            out_grad2,
+                                            norm_out,
+                                            vars,
+                                            gamma,
+                                            gamma_grad,
+                                            betta_grad,
+                                            inp_grad_out,
+                                            bsz,
+                                            config_.hiddenDim,
+                                            stream,
+                                            !config_.useMean,
+                                            betta);
+    }
+
+template <typename T>
+void launch_d_gelu(T* d_output,
+                   const T* input,
+                   const T* bias,
+                   int intermediate_size,
+                   int batch_size,
+                   cudaStream_t stream);
+template <typename T>
+void Backward(int bsz, T* d_output, const T* input_buf, const T* bias, cudaStream_t stream)
+{
+    launch_d_gelu<T>(d_output, input_buf, bias, _config.intermediate_size, bsz, stream);
+}
+
+// Fused bias add with gelu activation
+template <typename T>
+void launch_bias_gelu(const T* input,
+                      const T* bias,
+                      T* output,
+                      int intermediate_size,
+                      int batch_size,
+                      cudaStream_t stream);
+
+template <typename T>
+void ForwardWithBiasAdd(int bsz,
+                            const T* input_buf,
+                            const T* bias,
+                            T* output,
+                            cudaStream_t stream)
+{
+    launch_bias_gelu<T>(input_buf, bias, output, _config.intermediate_size, bsz, stream);
+}
+
 int cublas_gemm_ex(cublasHandle_t handle,
                    cublasOperation_t transa,
                    cublasOperation_t transb,
@@ -222,6 +451,74 @@ int cublas_fine_gemm_ex(const T* input_ptr,
                           algo);
 }
 
+template <typename T>
+void launch_fuse_transpose_bias_kernel(const T* inp,
+                                       T* out,
+                                       int rows,
+                                       int cols
+                                       );
+
+template <typename T>
+__global__ void column_sum_reduce(const T* __restrict__ inp,
+                                  T* __restrict__ out,
+                                  int rows,
+                                  int width);
+
+template <>
+void launch_fuse_transpose_bias_kernel<float>(const float* inp,
+                                              float* out,
+                                              int rows,
+                                              int cols
+                                              )
+{
+    dim3 grid_dim((cols - 1) / TILE_DIM + 1);
+    dim3 block_dim(TILE_DIM, TILE_DIM);
+
+    column_sum_reduce<float><<<grid_dim, block_dim, 0>>>(inp, out, rows, cols);
+}
+
+template <typename T>
+__global__ void column_sum_reduce(const T* __restrict__ inp,
+                                  T* __restrict__ out,
+                                  int rows,
+                                  int width)
+{
+    __shared__ float tile[TILE_DIM][TILE_DIM + 1];
+
+    cg::thread_block b = cg::this_thread_block();
+    cg::thread_block_tile<TILE_DIM> g = cg::tiled_partition<TILE_DIM>(b);
+
+    int idx = blockDim.x * blockIdx.x + threadIdx.x;
+
+    int y_stride = width * TILE_DIM;
+
+    float localSum = 0;
+
+    if (idx < width) {
+        int offset = threadIdx.y * width + idx;
+        for (int r = threadIdx.y; r < rows; r += TILE_DIM) {
+            localSum += (float)inp[offset];
+            offset += y_stride;
+        }
+    }
+
+    tile[threadIdx.x][threadIdx.y] = localSum;
+
+    __syncthreads();
+
+    float sum = tile[threadIdx.y][threadIdx.x];
+
+#ifndef __STOCHASTIC_MODE__
+    __syncthreads();
+#endif
+
+    for (int i = 1; i < TILE_DIM; i <<= 1) sum += g.shfl_down(sum, i);
+
+    if (threadIdx.x == 0) {
+        int pos = blockIdx.x * TILE_DIM + threadIdx.y;
+        if (pos < width) out[pos] = sum;
+    }
+}
 
 template <typename T>
 class FeedForward {
@@ -338,6 +635,116 @@ public:
      
         if ( sync == true )
             CHECK(cudaThreadSynchronize());
+    }
+
+void Backward(int bsz,
+                  Buffer<T>* out_grad,
+		  Buffer<T>* input_ptr,
+		  Buffer<T>* weights,
+                  Buffer<T>* weights_grad,
+                  Buffer<T>* bias_grad,
+                  int sync,
+                  ScheduleEngine* SE,
+                  
+                  Buffer<T>* inp_grad_out = nullptr,
+                  Buffer<T>* out_grad_trans_out = nullptr)
+    {
+        float alpha = (T)1.0, beta = (T)0.0;
+       // cublas_gemm_ex(SE,
+                       //CUBLAS_OP_N,
+                       //CUBLAS_OP_T,
+           //            config_.inputSize,
+         //              config_.outputSize,
+             //          bsz,
+                       //&alpha,
+                       //&beta,
+               //        input_ptr->get_device_data(),
+                 //      out_grad->get_device_data(),
+                   //    weights_grad->get_device_data(),
+                     //  cublasGemmAlgo_t(config_.gemm_algos[1]));
+	cublas_gemm_ex(input_ptr->get_device_data(), 
+		weights_grad->get_device_data(),
+		out_grad->get_device_data(),
+		config_.outputSize,
+		bsz,
+		config_.inputSize,
+		SE->handle,
+		SE->compute,
+		0,
+		cublasGemmAlgo_t(config_.gemm_algos[0]));
+
+
+        //cublas_gemm_ex(SE,
+                       //CUBLAS_OP_N,
+                       //CUBLAS_OP_N,
+          //             config_.inputSize,
+            //           bsz,
+              //         config_.outputSize,
+                       //&alpha,
+                       //&beta,
+                //       weights->get_device_data(),
+                  //     out_grad->get_device_data(),
+                    //   inp_grad_out->get_device_data(),
+                      // cublasGemmAlgo_t(config_.gemm_algos[2]));
+
+cublas_gemm_ex(input_ptr->get_device_data(), 
+		weights_grad->get_device_data(),
+		out_grad->get_device_data(),
+		config_.outputSize,
+		bsz,
+		config_.inputSize,
+		SE->handle,
+		SE->compute,
+		0,
+		cublasGemmAlgo_t(config_.gemm_algos[0]));
+
+        launch_fuse_transpose_bias_kernel<T>(out_grad, bias_grad, bsz, config_.outputSize);
+    }
+
+void Backward(int bsz,
+                  const T* out_grad,
+                  const T* gamma,
+                  T* gamma_grad,
+                  T* betta_grad,
+                  cudaStream_t stream[2],
+                  T* inp_grad_out,
+                  const T* norm_in = nullptr)
+    {
+        launch_layerNorm_backward(out_grad,
+                                  norm_in,
+                                  vars,
+                                  means,
+                                  gamma,
+                                  gamma_grad,
+                                  betta_grad,
+                                  inp_grad_out,
+                                  bsz,
+                                  config_.hiddenDim,
+                                  stream);
+    }
+
+    void Backward(int bsz,
+                  const T* out_grad,
+                  const T* gamma,
+                  const T* betta,
+                  T* gamma_grad,
+                  T* betta_grad,
+                  cudaStream_t stream[2],
+                  T* inp_grad_out,
+                  const T* norm_out)
+    {
+        launch_layerNorm_backward(out_grad,
+                                  norm_out,
+                                  vars,
+                                  gamma,
+                                  gamma_grad,
+                                  betta_grad,
+                                  inp_grad_out,
+                                  bsz,
+                                  config_.hiddenDim,
+                                  stream,
+                                  !config_.useMean,
+                                  betta);
     }
 
 private:
